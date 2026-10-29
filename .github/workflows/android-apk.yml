@@ -95,12 +95,13 @@ jobs:
           data = json.loads(os.environ['ANDROID_SIGNING'])
           root = pathlib.Path(os.environ['SIGNING_DIR'])
           (root / 'release.jks').write_bytes(base64.b64decode(data['keystore'], validate=True))
-          (root / 'password').write_text(data['password'], encoding='utf-8')
+          (root / 'password').write_text(data['password'] + '\n', encoding='utf-8')
+          (root / 'key-password').write_text(data['password'] + '\n', encoding='utf-8')
           PY
           unset ANDROID_SIGNING
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
-          "$BUILD_TOOLS/zipalign" -P 16 -f -v 4 unsigned/*-unsigned.apk aligned.apk
-          "$BUILD_TOOLS/apksigner" sign --ks "$SIGNING_DIR/release.jks" --ks-key-alias csyphone --ks-pass "file:$SIGNING_DIR/password" --key-pass "file:$SIGNING_DIR/password" --out CsyPhone.apk aligned.apk
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          "$BUILD_TOOLS/zipalign" -P 16 -f 4 unsigned/*-unsigned.apk aligned.apk
+          "$BUILD_TOOLS/apksigner" sign --ks "$SIGNING_DIR/release.jks" --ks-key-alias csyphone --ks-pass "file:$SIGNING_DIR/password" --key-pass "file:$SIGNING_DIR/key-password" --out CsyPhone.apk aligned.apk
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs CsyPhone.apk
           sha256sum CsyPhone.apk > CsyPhone.apk.sha256
       - name: Publish versioned release and stable latest download
