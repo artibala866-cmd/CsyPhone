@@ -1,0 +1,121 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build bundled web app without embedded credentials
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+          VITE_CSYOS_BACKEND_URL: https://chushiyu.de5.net
+          VITE_CSYOS_BACKEND_TOKEN: ''
+          VITE_CSYOS_TTS_WS_PROXY_URL: wss://tts-ws-proxy.sully-tts-proxy.workers.dev/ws
+          VITE_CSYOS_FRONTEND_ORIGIN: https://sully-frontend.pages.dev
+        run: npm run build -- --mode android
+      - name: Generate and sync Capacitor Android project
+        run: |
+          npx --no-install cap add android
+          npx --no-install cap sync android
+          node scripts/prepare-android.mjs
+      - name: Build release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-unsigned-${{ github.run_number }}
+          path: android/app/build/outputs/apk/release/*-unsigned.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-unsigned-${{ github.run_number }}
+          path: unsigned
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Sign and verify APK
+        env:
+          ANDROID_SIGNING: ${{ secrets.ANDROID_SIGNING }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_SIGNING" || { echo 'Missing ANDROID_SIGNING repository secret'; exit 1; }
+          umask 077
+          SIGNING_DIR="$(mktemp -d)"
+          export SIGNING_DIR
+          trap 'rm -rf "$SIGNING_DIR"' EXIT
+          python3 - <<'PY'
+          import os, json, base64, pathlib
+          data = json.loads(os.environ['ANDROID_SIGNING'])
+          root = pathlib.Path(os.environ['SIGNING_DIR'])
+          (root / 'release.jks').write_bytes(base64.b64decode(data['keystore'], validate=True))
+          (root / 'password').write_text(data['password'], encoding='utf-8')
+          PY
+          unset ANDROID_SIGNING
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          "$BUILD_TOOLS/zipalign" -P 16 -f -v 4 unsigned/*-unsigned.apk aligned.apk
+          "$BUILD_TOOLS/apksigner" sign --ks "$SIGNING_DIR/release.jks" --ks-key-alias csyphone --ks-pass "file:$SIGNING_DIR/password" --key-pass "file:$SIGNING_DIR/password" --out CsyPhone.apk aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs CsyPhone.apk
+          sha256sum CsyPhone.apk > CsyPhone.apk.sha256
+      - name: Publish versioned release and stable latest download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="android-${RUN_NUMBER}-${RUN_ATTEMPT}"
+          cat > release-notes.md <<EOF_NOTES
+          Automatically built from main commit ${COMMIT_SHA}.
+          Signed release APK; Android versionCode $((100000 + RUN_NUMBER)).
+          No backend tokens, API keys, or signing private keys are bundled.
+          Backend features requiring authentication need runtime configuration.
+
+          Stable latest APK: https://github.com/${GH_REPO}/releases/latest/download/CsyPhone.apk
+          EOF_NOTES
+          gh release create "$TAG" CsyPhone.apk CsyPhone.apk.sha256 --target "$COMMIT_SHA" --title "CsyPhone Android #${RUN_NUMBER}" --notes-file release-notes.md --latest
+          echo "### Latest APK" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${GH_REPO}/releases/latest/download/CsyPhone.apk" >> "$GITHUB_STEP_SUMMARY"
