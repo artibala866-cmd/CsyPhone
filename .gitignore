@@ -38,3 +38,8 @@ vite.config.ts.timestamp-*
 # Local-only XHS toolkit dependency
 scripts/xiaohongshu-skills/
 scripts/xiaohongshu-skills-main/
+
+# Android is generated from the locked Capacitor dependencies in CI.
+android/
+*.jks
+*.keystore
